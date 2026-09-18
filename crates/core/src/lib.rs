@@ -6,3 +6,4 @@ pub mod sampler;
 pub mod targets;
 
 pub use model::{AddMode, Sample, Target, VramBoardSample, VramProcessSample, WindowConfig};
+pub use targets::PidStatus;

@@ -109,3 +109,27 @@
 - Color palette: distinct hues per target series (discretion: technical clean theme)
 - Export filename: `beholder_export_{timestamp}.{csv|json}` (discretion)
 - MCP error codes mapped to JSON-RPC error codes (-32000 range for app errors)
+
+## [2026-09-18] Critical/High fixes for PR #1
+
+### Critical fixes
+- **C1: PID reuse validation**: Added `check_pid_status()` and `PidStatus` enum (Alive/Dead/Reused). Sampler now validates starttime every sample via `/proc/{pid}/stat`. Series stop when PID is reused.
+- **C2: MCP background ticker**: MCP mode now spawns a background thread that samples at the configured interval. Tools read live buffer data, not sample-on-call.
+- **C3: get_live/latest returns raw sample**: Added `latest_raw()` for actual last sample values. `latest_downsampled()` returns bucket max for charts. `get_live` MCP tool uses `latest_raw()`.
+
+### High fixes
+- **H4: CPU% separate timestamp**: Bucket now stores `rss_ts_ms` and `cpu_ts_ms` separately. RAM max and CPU last may come from different samples.
+- **H5: num_cpus detection warning**: If `system.cpus().len()` returns 0, prints WARNING to stderr and defaults to 1. Added `num_cpus_detected()` to health endpoint.
+- **H6: Permission vs no-match**: Added `PartialPermission` error variant and `ERR_PARTIAL_PERMISSION` (-32008) error code. Distinguishes permission errors from true no-match.
+- **H7: Docs wgpu→glow**: Updated `00-brief.md` and `05-non-negotiables.md` to reflect actual renderer (glow/OpenGL via eframe).
+
+### Tests added
+- PID status tests: `test_pid_status_alive`, `test_pid_status_dead_after_mark`, `test_pid_status_dead_for_invalid`
+- Starttime tests: `test_get_starttime_self`, `test_get_starttime_invalid`, `test_starttime_matches_on_add`
+- Buffer tests: `test_cpu_timestamp_separate_from_rss`, `test_latest_raw_vs_downsampled`
+
+### API changes
+- `Sampler::sample_targets()` → `Sampler::sample_pids()` returns `SampleResult` with `not_found` list
+- `RingSeries::latest()` → `latest_raw()` (raw sample) and `latest_downsampled()` (bucket values)
+- `RingSeries::get_points()` now returns `(rss_ts_ms, rss_bytes, cpu_ts_ms, cpu_pct)`
+- Added `get_starttime(pid)` public function for starttime lookup

@@ -1,6 +1,6 @@
 # Non-negotiables (Beholder)
 
-- Stack: Rust + egui + egui_plot + sysinfo + wgpu. Sem WebView/JS/Tauri/Electron.
+- Stack: Rust + egui + egui_plot + sysinfo + glow (OpenGL). Sem WebView/JS/Tauri/Electron.
 - Módulos/features no **mesmo binário** — proibido hexagonal/clean/DDD/repository; proibido 2 processos OS.
 - Agentes = **MCP `--mcp`** only. Zero HTTP. Paridade GUI ↔ tools MCP.
 - MCP headless (sem janela) é modo MVP do mesmo binário.
