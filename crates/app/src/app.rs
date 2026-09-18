@@ -396,7 +396,7 @@ impl eframe::App for BeholderApp {
                         if let Some(series) = self.model.buffer.get_ram_series(target.pid) {
                             if let Some((_, rss, cpu)) = series.latest() {
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("  RSS: {}", format_bytes(rss)));
+                                    ui.label(format!("  Current (RSS): {}", format_bytes(rss)));
                                     ui.label(format!("CPU: {:.1}%", cpu));
                                 });
                             }
@@ -447,11 +447,12 @@ impl eframe::App for BeholderApp {
             let available = ui.available_size();
             let plot_height = (available.y - 20.0) / 2.0;
 
-            ui.heading("RSS (Resident Set Size)");
+            ui.heading("Current (RSS)");
             let rss_plot = Plot::new("rss_plot")
                 .height(plot_height)
                 .x_axis_label("Time (s)")
-                .y_axis_label("Bytes")
+                .y_axis_label("MB")
+                .y_axis_formatter(|mark, _range| format!("{:.2}", mark.value))
                 .legend(egui_plot::Legend::default());
 
             rss_plot.show(ui, |plot_ui| {
@@ -461,7 +462,7 @@ impl eframe::App for BeholderApp {
                         let points: PlotPoints = series
                             .get_points()
                             .iter()
-                            .map(|(ts, rss, _)| [*ts as f64 / 1000.0, *rss as f64])
+                            .map(|(ts, rss, _)| [*ts as f64 / 1000.0, bytes_to_mb(*rss)])
                             .collect();
 
                         let color = Self::color_for_index(idx);
@@ -479,7 +480,8 @@ impl eframe::App for BeholderApp {
             let vram_plot = Plot::new("vram_plot")
                 .height(plot_height)
                 .x_axis_label("Time (s)")
-                .y_axis_label("Bytes")
+                .y_axis_label("MB")
+                .y_axis_formatter(|mark, _range| format!("{:.2}", mark.value))
                 .legend(egui_plot::Legend::default());
 
             vram_plot.show(ui, |plot_ui| {
@@ -489,7 +491,7 @@ impl eframe::App for BeholderApp {
                         let points: PlotPoints = series
                             .get_points()
                             .iter()
-                            .map(|(ts, vram)| [*ts as f64 / 1000.0, *vram as f64])
+                            .map(|(ts, vram)| [*ts as f64 / 1000.0, bytes_to_mb(*vram)])
                             .collect();
 
                         let color = Self::color_for_index(idx);
@@ -503,6 +505,10 @@ impl eframe::App for BeholderApp {
             });
         });
     }
+}
+
+fn bytes_to_mb(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
 }
 
 fn format_bytes(bytes: u64) -> String {
