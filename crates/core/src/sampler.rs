@@ -1,6 +1,5 @@
 use crate::model::{Sample, VramProcessSample};
 use crate::nvml::NvmlWrapper;
-use crate::targets::TargetManager;
 use std::time::Instant;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -8,16 +7,24 @@ pub struct Sampler {
     system: System,
     start_time: Instant,
     num_cpus: usize,
+    num_cpus_detected: bool,
 }
 
 impl Sampler {
     pub fn new() -> Self {
-        let system = System::new();
-        let num_cpus = system.cpus().len().max(1);
+        let mut system = System::new();
+        system.refresh_cpu_all();
+        let cpu_count = system.cpus().len();
+        let num_cpus_detected = cpu_count > 0;
+        let num_cpus = if num_cpus_detected { cpu_count } else {
+            eprintln!("WARNING: Could not detect CPU count, defaulting to 1. CPU% may be inaccurate.");
+            1
+        };
         Self {
             system,
             start_time: Instant::now(),
             num_cpus,
+            num_cpus_detected,
         }
     }
 
@@ -25,12 +32,19 @@ impl Sampler {
         self.start_time.elapsed().as_millis() as u64
     }
 
-    pub fn sample_targets(
+    pub fn num_cpus(&self) -> usize {
+        self.num_cpus
+    }
+
+    pub fn num_cpus_detected(&self) -> bool {
+        self.num_cpus_detected
+    }
+
+    pub fn sample_pids(
         &mut self,
-        targets: &mut TargetManager,
+        pids: &[u32],
         nvml: Option<&NvmlWrapper>,
-    ) -> (Vec<Sample>, Vec<VramProcessSample>) {
-        let pids: Vec<u32> = targets.alive_pids();
+    ) -> SampleResult {
         let ts_ms = self.ts_ms();
 
         let pid_list: Vec<Pid> = pids.iter().map(|&p| Pid::from_u32(p)).collect();
@@ -43,8 +57,9 @@ impl Sampler {
 
         let mut ram_samples = Vec::new();
         let mut vram_samples = Vec::new();
+        let mut not_found = Vec::new();
 
-        for &pid in &pids {
+        for &pid in pids {
             let sysinfo_pid = Pid::from_u32(pid);
 
             if let Some(process) = self.system.process(sysinfo_pid) {
@@ -70,12 +85,22 @@ impl Sampler {
                     }
                 }
             } else {
-                targets.mark_dead(pid);
+                not_found.push(pid);
             }
         }
 
-        (ram_samples, vram_samples)
+        SampleResult {
+            ram_samples,
+            vram_samples,
+            not_found,
+        }
     }
+}
+
+pub struct SampleResult {
+    pub ram_samples: Vec<Sample>,
+    pub vram_samples: Vec<VramProcessSample>,
+    pub not_found: Vec<u32>,
 }
 
 impl Default for Sampler {

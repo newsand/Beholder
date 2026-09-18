@@ -8,7 +8,7 @@ Aplicativo **desktop** local (**Linux no MVP**; Windows depois) para medição p
 
 ## Stack obrigatória
 - Linguagem: **Rust**
-- UI: **egui** + **egui_plot** + **wgpu** (Vulkan / DX12 / OpenGL fallback)
+- UI: **egui** + **egui_plot** + **glow** (OpenGL, via eframe)
 - Coleta processo: **sysinfo** + `/proc` / Win32 quando necessário
 - Coleta VRAM: **NVML in-process** (não parsear CLI `nvidia-smi` a cada sample)
 - Agentes: **MCP** com flag **`--mcp`** (stdio) — **zero HTTP/REST/POST**

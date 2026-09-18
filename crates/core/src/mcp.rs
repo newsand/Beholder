@@ -6,6 +6,9 @@ use crate::targets::TargetManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -43,29 +46,108 @@ const ERR_INVALID_INTERVAL: i32 = -32004;
 const ERR_INVALID_WINDOW: i32 = -32005;
 const ERR_TARGET_NOT_WATCHED: i32 = -32006;
 const ERR_NAME_NO_MATCH: i32 = -32007;
+const ERR_PARTIAL_PERMISSION: i32 = -32008;
 const ERR_INVALID_PARAMS: i32 = -32602;
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
 
-pub struct McpServer {
+struct SharedState {
     targets: TargetManager,
     buffer: BufferManager,
     sampler: Sampler,
-    nvml: Option<NvmlWrapper>,
     last_vram_board: Option<VramBoardSample>,
+}
+
+pub struct McpServer {
+    state: Arc<Mutex<SharedState>>,
+    nvml: Option<Arc<NvmlWrapper>>,
+    ticker_running: Arc<Mutex<bool>>,
 }
 
 impl McpServer {
     pub fn new(nvml: Option<NvmlWrapper>) -> Self {
+        let nvml = nvml.map(Arc::new);
         Self {
-            targets: TargetManager::new(),
-            buffer: BufferManager::default(),
-            sampler: Sampler::new(),
+            state: Arc::new(Mutex::new(SharedState {
+                targets: TargetManager::new(),
+                buffer: BufferManager::default(),
+                sampler: Sampler::new(),
+                last_vram_board: None,
+            })),
             nvml,
-            last_vram_board: None,
+            ticker_running: Arc::new(Mutex::new(false)),
         }
     }
 
+    fn start_ticker(&self) {
+        let state = Arc::clone(&self.state);
+        let nvml = self.nvml.clone();
+        let running = Arc::clone(&self.ticker_running);
+
+        {
+            let mut r = running.lock().unwrap();
+            if *r {
+                return;
+            }
+            *r = true;
+        }
+
+        thread::spawn(move || {
+            loop {
+                let interval_ms = {
+                    let s = state.lock().unwrap();
+                    s.buffer.config().interval_ms
+                };
+
+                thread::sleep(Duration::from_millis(interval_ms as u64));
+
+                {
+                    let mut s = state.lock().unwrap();
+
+                    let mut pids_to_sample = Vec::new();
+                    for pid in s.targets.alive_pids() {
+                        match s.targets.check_pid_status(pid) {
+                            crate::targets::PidStatus::Dead => {
+                                s.targets.mark_dead(pid);
+                            }
+                            crate::targets::PidStatus::Reused => {
+                                s.targets.mark_reused(pid);
+                            }
+                            crate::targets::PidStatus::Alive => {
+                                pids_to_sample.push(pid);
+                            }
+                        }
+                    }
+
+                    let result = s.sampler.sample_pids(&pids_to_sample, nvml.as_deref());
+
+                    for pid in result.not_found {
+                        s.targets.mark_dead(pid);
+                    }
+
+                    for sample in result.ram_samples {
+                        s.buffer.push_ram(sample);
+                    }
+                    for sample in result.vram_samples {
+                        s.buffer.push_vram(sample);
+                    }
+
+                    if let Some(ref nvml) = nvml {
+                        if let Ok(board) = nvml.get_board_vram() {
+                            s.last_vram_board = Some(board);
+                        }
+                    }
+                }
+
+                if !*running.lock().unwrap() {
+                    break;
+                }
+            }
+        });
+    }
+
     pub fn run(&mut self) {
+        self.start_ticker();
+
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
         let reader = BufReader::new(stdin.lock());
@@ -103,6 +185,8 @@ impl McpServer {
             let _ = writeln!(stdout, "{}", serde_json::to_string(&response).unwrap());
             let _ = stdout.flush();
         }
+
+        *self.ticker_running.lock().unwrap() = false;
     }
 
     fn handle_request(&mut self, req: &JsonRpcRequest) -> JsonRpcResponse {
@@ -253,7 +337,7 @@ impl McpServer {
             },
             {
                 "name": "get_live",
-                "description": "Get current metrics for targets",
+                "description": "Get current metrics for targets (actual latest sample, not downsampled)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -268,7 +352,7 @@ impl McpServer {
             },
             {
                 "name": "window_stats",
-                "description": "Get peak/current/count stats for window",
+                "description": "Get peak/current/count stats for window (uses downsampled envelope)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -293,8 +377,6 @@ impl McpServer {
     }
 
     fn call_tool(&mut self, id: Value, name: &str, args: Value) -> JsonRpcResponse {
-        self.do_sample();
-
         let result = match name {
             "health" => self.tool_health(),
             "list_targets" => self.tool_list_targets(),
@@ -336,38 +418,24 @@ impl McpServer {
         }
     }
 
-    fn do_sample(&mut self) {
-        let (ram_samples, vram_samples) =
-            self.sampler.sample_targets(&mut self.targets, self.nvml.as_ref());
-
-        for sample in ram_samples {
-            self.buffer.push_ram(sample);
-        }
-        for sample in vram_samples {
-            self.buffer.push_vram(sample);
-        }
-
-        if let Some(ref nvml) = self.nvml {
-            if let Ok(board) = nvml.get_board_vram() {
-                self.last_vram_board = Some(board);
-            }
-        }
-    }
-
     fn tool_health(&self) -> Result<Value, (i32, String)> {
-        let config = self.buffer.config();
+        let state = self.state.lock().unwrap();
+        let config = state.buffer.config();
         Ok(json!({
             "version": VERSION,
             "sampler_ok": true,
             "nvml_available": self.nvml.is_some(),
             "window_secs": config.window_secs,
             "interval_ms": config.interval_ms,
-            "effective_bucket_ms": config.bucket_ms()
+            "effective_bucket_ms": config.bucket_ms(),
+            "num_cpus": state.sampler.num_cpus(),
+            "num_cpus_detected": state.sampler.num_cpus_detected()
         }))
     }
 
     fn tool_list_targets(&self) -> Result<Value, (i32, String)> {
-        let targets: Vec<Value> = self
+        let state = self.state.lock().unwrap();
+        let targets: Vec<Value> = state
             .targets
             .list()
             .map(|t| {
@@ -388,7 +456,8 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .ok_or((ERR_INVALID_PARAMS, "Missing pid".to_string()))? as u32;
 
-        match self.targets.add_by_pid(pid) {
+        let mut state = self.state.lock().unwrap();
+        match state.targets.add_by_pid(pid) {
             Ok(target) => Ok(json!({
                 "ok": true,
                 "pid": target.pid,
@@ -424,7 +493,8 @@ impl McpServer {
             _ => return Err((ERR_INVALID_PARAMS, "Invalid mode".to_string())),
         };
 
-        match self.targets.add_by_name(name, mode) {
+        let mut state = self.state.lock().unwrap();
+        match state.targets.add_by_name(name, mode) {
             Ok(pids) => Ok(json!({
                 "ok": true,
                 "added_pids": pids
@@ -432,6 +502,12 @@ impl McpServer {
             Err(e) => {
                 let (code, msg) = match &e {
                     crate::targets::TargetError::NameNoMatch(_) => (ERR_NAME_NO_MATCH, e.to_string()),
+                    crate::targets::TargetError::PartialPermission { .. } => {
+                        (ERR_PARTIAL_PERMISSION, e.to_string())
+                    }
+                    crate::targets::TargetError::PermissionDenied(_) => {
+                        (ERR_PERMISSION_DENIED, e.to_string())
+                    }
                     _ => (ERR_INVALID_PARAMS, e.to_string()),
                 };
                 Err((code, msg))
@@ -445,8 +521,9 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .ok_or((ERR_INVALID_PARAMS, "Missing pid".to_string()))? as u32;
 
-        self.buffer.remove_target(pid);
-        match self.targets.remove(pid) {
+        let mut state = self.state.lock().unwrap();
+        state.buffer.remove_target(pid);
+        match state.targets.remove(pid) {
             Ok(()) => Ok(json!({ "ok": true })),
             Err(e) => Err((ERR_TARGET_NOT_WATCHED, e.to_string())),
         }
@@ -462,9 +539,10 @@ impl McpServer {
             return Err((ERR_INVALID_INTERVAL, format!("Invalid interval: {}", ms)));
         }
 
-        let config = self.buffer.config();
+        let mut state = self.state.lock().unwrap();
+        let config = state.buffer.config();
         let new_config = WindowConfig::new(config.window_secs, ms).unwrap();
-        self.buffer.set_config(new_config);
+        state.buffer.set_config(new_config);
 
         Ok(json!({
             "ok": true,
@@ -483,9 +561,10 @@ impl McpServer {
             return Err((ERR_INVALID_WINDOW, format!("Invalid window: {}", secs)));
         }
 
-        let config = self.buffer.config();
+        let mut state = self.state.lock().unwrap();
+        let config = state.buffer.config();
         let new_config = WindowConfig::new(secs, config.interval_ms).unwrap();
-        self.buffer.set_config(new_config);
+        state.buffer.set_config(new_config);
 
         Ok(json!({
             "ok": true,
@@ -495,32 +574,36 @@ impl McpServer {
     }
 
     fn tool_clear_buffer(&mut self) -> Result<Value, (i32, String)> {
-        self.buffer.clear();
+        let mut state = self.state.lock().unwrap();
+        state.buffer.clear();
         Ok(json!({ "ok": true }))
     }
 
     fn tool_get_live(&self, args: &Value) -> Result<Value, (i32, String)> {
         let filter_pid = args.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
 
+        let state = self.state.lock().unwrap();
         let mut results = Vec::new();
 
-        for target in self.targets.list() {
+        for target in state.targets.list() {
             if let Some(pid) = filter_pid {
                 if target.pid != pid {
                     continue;
                 }
             }
 
-            let ram = self.buffer.get_ram_series(target.pid).and_then(|s| s.latest());
-            let vram = self.buffer.get_vram_series(target.pid).and_then(|s| s.latest());
+            let ram = state.buffer.get_ram_series(target.pid).and_then(|s| s.latest_raw());
+            let vram = state.buffer.get_vram_series(target.pid).and_then(|s| s.latest_raw());
 
             results.push(json!({
                 "pid": target.pid,
                 "name": target.name,
                 "alive": target.alive,
-                "rss_bytes": ram.map(|(_, r, _)| r),
-                "cpu_pct": ram.map(|(_, _, c)| c),
-                "vram_bytes": vram.map(|(_, v)| v)
+                "ts_ms": ram.map(|s| s.ts_ms),
+                "rss_bytes": ram.map(|s| s.rss_bytes),
+                "cpu_pct": ram.map(|s| s.cpu_pct),
+                "vram_ts_ms": vram.map(|s| s.ts_ms),
+                "vram_bytes": vram.map(|s| s.used_bytes)
             }));
         }
 
@@ -534,7 +617,8 @@ impl McpServer {
     }
 
     fn tool_get_vram(&self) -> Result<Value, (i32, String)> {
-        match &self.last_vram_board {
+        let state = self.state.lock().unwrap();
+        match &state.last_vram_board {
             Some(board) => Ok(json!({
                 "gpu_index": board.gpu_index,
                 "total_bytes": board.total_bytes,
@@ -548,24 +632,25 @@ impl McpServer {
     fn tool_window_stats(&self, args: &Value) -> Result<Value, (i32, String)> {
         let filter_pid = args.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
 
+        let state = self.state.lock().unwrap();
         let mut results = Vec::new();
 
-        for target in self.targets.list() {
+        for target in state.targets.list() {
             if let Some(pid) = filter_pid {
                 if target.pid != pid {
                     continue;
                 }
             }
 
-            let ram_series = self.buffer.get_ram_series(target.pid);
-            let vram_series = self.buffer.get_vram_series(target.pid);
+            let ram_series = state.buffer.get_ram_series(target.pid);
+            let vram_series = state.buffer.get_vram_series(target.pid);
 
             let ram_peak = ram_series.and_then(|s| s.peak_rss());
-            let ram_latest = ram_series.and_then(|s| s.latest());
+            let ram_latest = ram_series.and_then(|s| s.latest_downsampled());
             let ram_count = ram_series.map(|s| s.count()).unwrap_or(0);
 
             let vram_peak = vram_series.and_then(|s| s.peak());
-            let vram_latest = vram_series.and_then(|s| s.latest());
+            let vram_latest = vram_series.and_then(|s| s.latest_downsampled());
             let vram_count = vram_series.map(|s| s.count()).unwrap_or(0);
 
             results.push(json!({
@@ -574,14 +659,17 @@ impl McpServer {
                 "ram": {
                     "peak_bytes": ram_peak.map(|(_, r)| r),
                     "peak_ts_ms": ram_peak.map(|(t, _)| t),
-                    "current_bytes": ram_latest.map(|(_, r, _)| r),
-                    "current_cpu_pct": ram_latest.map(|(_, _, c)| c),
+                    "current_rss_bytes": ram_latest.map(|(_, r, _, _)| r),
+                    "current_rss_ts_ms": ram_latest.map(|(t, _, _, _)| t),
+                    "current_cpu_pct": ram_latest.map(|(_, _, _, c)| c),
+                    "current_cpu_ts_ms": ram_latest.map(|(_, _, t, _)| t),
                     "sample_count": ram_count
                 },
                 "vram": {
                     "peak_bytes": vram_peak.map(|(_, v)| v),
                     "peak_ts_ms": vram_peak.map(|(t, _)| t),
                     "current_bytes": vram_latest.map(|(_, v)| v),
+                    "current_ts_ms": vram_latest.map(|(t, _)| t),
                     "sample_count": vram_count
                 }
             }));
@@ -594,7 +682,7 @@ impl McpServer {
         }
 
         Ok(json!({
-            "window_secs": self.buffer.config().window_secs,
+            "window_secs": state.buffer.config().window_secs,
             "targets": results
         }))
     }
@@ -622,50 +710,53 @@ impl McpServer {
     }
 
     fn export_csv(&self, filter_pid: Option<u32>, max_points: usize) -> Result<Value, (i32, String)> {
-        let mut lines = vec!["ts_ms,pid,name,rss_bytes,cpu_pct,vram_bytes".to_string()];
+        let state = self.state.lock().unwrap();
+        let mut lines = vec!["rss_ts_ms,cpu_ts_ms,pid,name,rss_bytes,cpu_pct,vram_ts_ms,vram_bytes".to_string()];
 
-        for target in self.targets.list() {
+        for target in state.targets.list() {
             if let Some(pid) = filter_pid {
                 if target.pid != pid {
                     continue;
                 }
             }
 
-            let ram_points = self
+            let ram_points = state
                 .buffer
                 .get_ram_series(target.pid)
                 .map(|s| s.get_points())
                 .unwrap_or_default();
 
-            let vram_points = self
+            let vram_points = state
                 .buffer
                 .get_vram_series(target.pid)
                 .map(|s| s.get_points())
                 .unwrap_or_default();
 
-            let mut combined: Vec<(u64, Option<(u64, f32)>, Option<u64>)> = Vec::new();
+            let mut combined: Vec<(u64, u64, u64, f32, Option<(u64, u64)>)> = Vec::new();
 
-            for (ts, rss, cpu) in &ram_points {
-                combined.push((*ts, Some((*rss, *cpu)), None));
+            for (rss_ts, rss, cpu_ts, cpu) in &ram_points {
+                combined.push((*rss_ts, *cpu_ts, *rss, *cpu, None));
             }
 
             for (ts, vram) in &vram_points {
-                if let Some(entry) = combined.iter_mut().find(|(t, _, _)| *t == *ts) {
-                    entry.2 = Some(*vram);
+                if let Some(entry) = combined.iter_mut().find(|(rss_ts, _, _, _, _)| *rss_ts == *ts) {
+                    entry.4 = Some((*ts, *vram));
                 } else {
-                    combined.push((*ts, None, Some(*vram)));
+                    combined.push((*ts, *ts, 0, 0.0, Some((*ts, *vram))));
                 }
             }
 
-            combined.sort_by_key(|(ts, _, _)| *ts);
+            combined.sort_by_key(|(rss_ts, _, _, _, _)| *rss_ts);
 
             let skip = combined.len().saturating_sub(max_points);
-            for (ts, ram, vram) in combined.into_iter().skip(skip) {
-                let (rss, cpu) = ram.unwrap_or((0, 0.0));
-                let vram_str = vram.map(|v| v.to_string()).unwrap_or_default();
+            for (rss_ts, cpu_ts, rss, cpu, vram) in combined.into_iter().skip(skip) {
+                let (vram_ts_str, vram_str) = match vram {
+                    Some((ts, v)) => (ts.to_string(), v.to_string()),
+                    None => (String::new(), String::new()),
+                };
                 lines.push(format!(
-                    "{},{},{},{},{:.2},{}",
-                    ts, target.pid, target.name, rss, cpu, vram_str
+                    "{},{},{},{},{},{:.2},{},{}",
+                    rss_ts, cpu_ts, target.pid, target.name, rss, cpu, vram_ts_str, vram_str
                 ));
             }
         }
@@ -674,22 +765,23 @@ impl McpServer {
     }
 
     fn export_json(&self, filter_pid: Option<u32>, max_points: usize) -> Result<Value, (i32, String)> {
+        let state = self.state.lock().unwrap();
         let mut data = Vec::new();
 
-        for target in self.targets.list() {
+        for target in state.targets.list() {
             if let Some(pid) = filter_pid {
                 if target.pid != pid {
                     continue;
                 }
             }
 
-            let ram_points = self
+            let ram_points = state
                 .buffer
                 .get_ram_series(target.pid)
                 .map(|s| s.get_points())
                 .unwrap_or_default();
 
-            let vram_points = self
+            let vram_points = state
                 .buffer
                 .get_vram_series(target.pid)
                 .map(|s| s.get_points())
@@ -699,10 +791,11 @@ impl McpServer {
             let ram_samples: Vec<Value> = ram_points
                 .into_iter()
                 .skip(skip)
-                .map(|(ts, rss, cpu)| {
+                .map(|(rss_ts, rss, cpu_ts, cpu)| {
                     json!({
-                        "ts_ms": ts,
+                        "rss_ts_ms": rss_ts,
                         "rss_bytes": rss,
+                        "cpu_ts_ms": cpu_ts,
                         "cpu_pct": cpu
                     })
                 })
