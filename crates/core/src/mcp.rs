@@ -125,10 +125,10 @@ impl McpServer {
                     }
 
                     for sample in result.ram_samples {
-                        s.buffer.push_ram(sample);
+                        s.buffer.push_ram(sample, true);
                     }
                     for sample in result.vram_samples {
-                        s.buffer.push_vram(sample);
+                        s.buffer.push_vram(sample, true);
                     }
 
                     if let Some(ref nvml) = nvml {

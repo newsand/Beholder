@@ -28,7 +28,14 @@ pub enum Message {
     ClearBuffer,
     ExportCsv,
     ExportJson,
+    ToggleViewMode,
     Tick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Line,
+    Gauge,
 }
 
 pub struct Model {
@@ -41,6 +48,7 @@ pub struct Model {
     error_message: Option<String>,
     add_input: String,
     add_mode: AddMode,
+    view_mode: ViewMode,
 }
 
 impl Model {
@@ -55,6 +63,7 @@ impl Model {
             error_message: None,
             add_input: String::new(),
             add_mode: AddMode::Pid,
+            view_mode: ViewMode::Line,
         }
     }
 
@@ -97,6 +106,12 @@ impl Model {
             Message::ExportJson => {
                 self.export("json");
             }
+            Message::ToggleViewMode => {
+                self.view_mode = match self.view_mode {
+                    ViewMode::Line => ViewMode::Gauge,
+                    ViewMode::Gauge => ViewMode::Line,
+                };
+            }
             Message::Tick => {
                 self.do_sample();
             }
@@ -125,11 +140,12 @@ impl Model {
             self.targets.mark_dead(pid);
         }
 
+        let track_history = self.view_mode == ViewMode::Line;
         for sample in result.ram_samples {
-            self.buffer.push_ram(sample);
+            self.buffer.push_ram(sample, track_history);
         }
         for sample in result.vram_samples {
-            self.buffer.push_vram(sample);
+            self.buffer.push_vram(sample, track_history);
         }
 
         if let Some(ref nvml) = self.nvml {
@@ -336,6 +352,16 @@ impl eframe::App for BeholderApp {
                     }
                 });
 
+                ui.separator();
+
+                let gauge_label = match self.model.view_mode {
+                    ViewMode::Line => "📈 Line",
+                    ViewMode::Gauge => "🔲 Gauge",
+                };
+                if ui.button(gauge_label).clicked() {
+                    self.model.update(Message::ToggleViewMode);
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let nvml_status = if self.model.nvml.is_some() {
                         egui::RichText::new("GPU: OK").color(egui::Color32::GREEN)
@@ -400,21 +426,21 @@ impl eframe::App for BeholderApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (idx, target) in targets.iter().enumerate() {
                         ui.horizontal(|ui| {
+                            if ui.small_button("✕").clicked() {
+                                to_remove = Some(target.pid);
+                            }
+
                             let color = Self::color_for_index(idx);
                             ui.colored_label(color, "●");
 
                             let status = if target.alive { "" } else { " (dead)" };
                             ui.label(format!("[{}] {}{}", target.pid, target.name, status));
-
-                            if ui.small_button("✕").clicked() {
-                                to_remove = Some(target.pid);
-                            }
                         });
 
                         if let Some(series) = self.model.buffer.get_ram_series(target.pid) {
                             if let Some(sample) = series.latest_raw() {
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("  RSS: {}", format_bytes(sample.rss_bytes)));
+                                    ui.label(format!("  Current (RSS): {}", format_bytes(sample.rss_bytes)));
                                     ui.label(format!("CPU: {:.1}%", sample.cpu_pct));
                                 });
                             }
@@ -462,65 +488,240 @@ impl eframe::App for BeholderApp {
                 ui.separator();
             }
 
-            let available = ui.available_size();
-            let plot_height = (available.y - 20.0) / 2.0;
+            match self.model.view_mode {
+                ViewMode::Line => {
+                    let available = ui.available_size();
+                    let plot_height = (available.y - 20.0) / 2.0;
 
-            ui.heading("RSS (Resident Set Size)");
-            let rss_plot = Plot::new("rss_plot")
-                .height(plot_height)
-                .x_axis_label("Time (s)")
-                .y_axis_label("Bytes")
-                .legend(egui_plot::Legend::default());
+                    ui.heading("Current (RSS)");
+                    let rss_plot = Plot::new("rss_plot")
+                        .height(plot_height)
+                        .x_axis_label("Time (s)")
+                        .y_axis_label("MB")
+                        .y_axis_formatter(|mark, _range| format!("{:.2}", mark.value))
+                        .legend(egui_plot::Legend::default());
 
-            rss_plot.show(ui, |plot_ui| {
-                let targets: Vec<_> = self.model.targets.list().cloned().collect();
-                for (idx, target) in targets.iter().enumerate() {
-                    if let Some(series) = self.model.buffer.get_ram_series(target.pid) {
-                        let points: PlotPoints = series
-                            .get_points()
-                            .iter()
-                            .map(|(rss_ts, rss, _, _)| [*rss_ts as f64 / 1000.0, *rss as f64])
-                            .collect();
+                    rss_plot.show(ui, |plot_ui| {
+                        let targets: Vec<_> = self.model.targets.list().cloned().collect();
+                        for (idx, target) in targets.iter().enumerate() {
+                            if let Some(series) = self.model.buffer.get_ram_series(target.pid) {
+                                let points: PlotPoints = series
+                                    .get_points()
+                                    .iter()
+                                    .map(|(rss_ts, rss, _, _)| [*rss_ts as f64 / 1000.0, bytes_to_mb(*rss)])
+                                    .collect();
 
-                        let color = Self::color_for_index(idx);
-                        let line = Line::new(points)
-                            .name(format!("{} ({})", target.name, target.pid))
-                            .color(color)
-                            .width(2.0_f32);
-                        plot_ui.line(line);
-                    }
+                                let color = Self::color_for_index(idx);
+                                let line = Line::new(points)
+                                    .name(format!("{} ({})", target.name, target.pid))
+                                    .color(color)
+                                    .width(2.0_f32);
+                                plot_ui.line(line);
+                            }
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.heading("VRAM per Process");
+                    let vram_plot = Plot::new("vram_plot")
+                        .height(plot_height)
+                        .x_axis_label("Time (s)")
+                        .y_axis_label("MB")
+                        .y_axis_formatter(|mark, _range| format!("{:.2}", mark.value))
+                        .legend(egui_plot::Legend::default());
+
+                    vram_plot.show(ui, |plot_ui| {
+                        let targets: Vec<_> = self.model.targets.list().cloned().collect();
+                        for (idx, target) in targets.iter().enumerate() {
+                            if let Some(series) = self.model.buffer.get_vram_series(target.pid) {
+                                let points: PlotPoints = series
+                                    .get_points()
+                                    .iter()
+                                    .map(|(ts, vram)| [*ts as f64 / 1000.0, bytes_to_mb(*vram)])
+                                    .collect();
+
+                                let color = Self::color_for_index(idx);
+                                let line = Line::new(points)
+                                    .name(format!("{} ({})", target.name, target.pid))
+                                    .color(color)
+                                    .width(2.0_f32);
+                                plot_ui.line(line);
+                            }
+                        }
+                    });
                 }
-            });
+                ViewMode::Gauge => {
+                    ui.heading("Current (RSS) — Gauge");
+                    ui.label(
+                        egui::RichText::new(
+                            "Live snapshot only — history isn't retained while this mode is active.",
+                        )
+                        .color(egui::Color32::GRAY)
+                        .small(),
+                    );
+                    ui.add_space(6.0);
 
-            ui.add_space(10.0);
-            ui.heading("VRAM per Process");
-            let vram_plot = Plot::new("vram_plot")
-                .height(plot_height)
-                .x_axis_label("Time (s)")
-                .y_axis_label("Bytes")
-                .legend(egui_plot::Legend::default());
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                        // horizontal_wrapped can't be trusted to wrap here: the tiles
+                        // are drawn via egui::Frame, whose size isn't known to the wrap
+                        // layouter until after it's placed. Compute columns explicitly
+                        // from the available width instead, and lay out row by row —
+                        // this recalculates every frame, so resizing the window
+                        // reflows the grid immediately.
+                        const TILE_WIDTH: f32 = 190.0;
+                        let spacing = ui.spacing().item_spacing.x;
+                        let columns = (((ui.available_width() + spacing) / (TILE_WIDTH + spacing))
+                            .floor() as usize)
+                            .max(1);
 
-            vram_plot.show(ui, |plot_ui| {
-                let targets: Vec<_> = self.model.targets.list().cloned().collect();
-                for (idx, target) in targets.iter().enumerate() {
-                    if let Some(series) = self.model.buffer.get_vram_series(target.pid) {
-                        let points: PlotPoints = series
-                            .get_points()
-                            .iter()
-                            .map(|(ts, vram)| [*ts as f64 / 1000.0, *vram as f64])
-                            .collect();
+                        let targets: Vec<_> = self.model.targets.list().cloned().collect();
+                        for row in targets.chunks(columns) {
+                            ui.horizontal(|ui| {
+                                for target in row {
+                                    let idx = self
+                                        .model
+                                        .targets
+                                        .list()
+                                        .position(|t| t.pid == target.pid)
+                                        .unwrap_or(0);
+                                    let ram_gauge = self
+                                        .model
+                                        .buffer
+                                        .get_ram_series(target.pid)
+                                        .and_then(|s| s.gauge());
+                                    let vram_gauge = self
+                                        .model
+                                        .buffer
+                                        .get_vram_series(target.pid)
+                                        .and_then(|s| s.gauge());
 
-                        let color = Self::color_for_index(idx);
-                        let line = Line::new(points)
-                            .name(format!("{} ({})", target.name, target.pid))
-                            .color(color)
-                            .width(2.0_f32);
-                        plot_ui.line(line);
-                    }
+                                    Self::draw_gauge_tile(
+                                        ui,
+                                        &format!("{} ({})", target.name, target.pid),
+                                        Self::color_for_index(idx),
+                                        ram_gauge,
+                                        vram_gauge,
+                                    );
+                                }
+                            });
+                        }
+                    });
                 }
-            });
+            }
         });
     }
+}
+
+impl BeholderApp {
+    fn draw_gauge_tile(
+        ui: &mut egui::Ui,
+        label: &str,
+        color: egui::Color32,
+        ram_gauge: Option<(u64, u64, u64)>,
+        vram_gauge: Option<(u64, u64, u64)>,
+    ) {
+        egui::Frame::none()
+            .fill(egui::Color32::from_gray(30))
+            .stroke(egui::Stroke::new(1.0_f32, color))
+            .inner_margin(egui::Margin::same(10.0))
+            .rounding(6.0)
+            .show(ui, |ui| {
+                ui.set_width(190.0);
+                ui.vertical_centered(|ui| {
+                    ui.colored_label(color, label);
+                    ui.separator();
+
+                    if let Some((current, min, max)) = ram_gauge {
+                        ui.label("RAM");
+                        Self::paint_dial(ui, current, min, max);
+                        ui.heading(format!("{:.2} MB", bytes_to_mb(current)));
+                        ui.label(format!(
+                            "min {:.2} · max {:.2}",
+                            bytes_to_mb(min),
+                            bytes_to_mb(max)
+                        ));
+                    } else {
+                        ui.label("RAM: —");
+                    }
+
+                    if let Some((current, min, max)) = vram_gauge {
+                        ui.add_space(6.0);
+                        ui.label("VRAM");
+                        Self::paint_dial(ui, current, min, max);
+                        ui.heading(format!("{:.2} MB", bytes_to_mb(current)));
+                        ui.label(format!(
+                            "min {:.2} · max {:.2}",
+                            bytes_to_mb(min),
+                            bytes_to_mb(max)
+                        ));
+                    }
+                });
+            });
+    }
+
+    /// Speedometer-style dial: a semicircular arc sweeping from `min` to
+    /// `max`, with a needle pointing at `current`.
+    fn paint_dial(ui: &mut egui::Ui, current: u64, min: u64, max: u64) {
+        let size = egui::vec2(160.0, 90.0);
+        let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+
+        let center = rect.center_bottom() - egui::vec2(0.0, 6.0);
+        let radius = (rect.width() / 2.0).min(rect.height()) - 6.0;
+
+        const START_ANGLE: f32 = std::f32::consts::PI;
+        const END_ANGLE: f32 = 0.0;
+        const STEPS: usize = 48;
+
+        let arc_point = |t: f32| {
+            let angle = START_ANGLE + (END_ANGLE - START_ANGLE) * t;
+            center + egui::vec2(angle.cos(), -angle.sin()) * radius
+        };
+
+        let track: Vec<egui::Pos2> = (0..=STEPS).map(|i| arc_point(i as f32 / STEPS as f32)).collect();
+        painter.add(egui::Shape::line(
+            track,
+            egui::Stroke::new(6.0_f32, egui::Color32::from_gray(60)),
+        ));
+
+        let range = max.saturating_sub(min).max(1);
+        let frac = (current.saturating_sub(min) as f32 / range as f32).clamp(0.0, 1.0);
+        let filled_steps = ((STEPS as f32) * frac).ceil() as usize;
+
+        // Blue (low) -> red (high), drawn as a per-segment gradient so the
+        // arc itself shows the climb, not just the needle.
+        for i in 0..filled_steps {
+            let t0 = i as f32 / STEPS as f32;
+            let t1 = ((i + 1) as f32 / STEPS as f32).min(frac);
+            painter.line_segment(
+                [arc_point(t0), arc_point(t1)],
+                egui::Stroke::new(6.0_f32, Self::heat_color(t1)),
+            );
+        }
+
+        let needle_color = Self::heat_color(frac);
+        let needle_angle = START_ANGLE + (END_ANGLE - START_ANGLE) * frac;
+        let needle_end = center + egui::vec2(needle_angle.cos(), -needle_angle.sin()) * (radius - 10.0);
+        painter.line_segment([center, needle_end], egui::Stroke::new(2.5_f32, needle_color));
+        painter.circle_filled(center, 4.0, needle_color);
+    }
+
+    /// Interpolates blue (cold, low usage) to red (hot, high usage) by `t` in [0, 1].
+    fn heat_color(t: f32) -> egui::Color32 {
+        let t = t.clamp(0.0, 1.0);
+        const LOW: (f32, f32, f32) = (60.0, 130.0, 246.0); // blue
+        const HIGH: (f32, f32, f32) = (230.0, 50.0, 50.0); // red
+        let r = LOW.0 + (HIGH.0 - LOW.0) * t;
+        let g = LOW.1 + (HIGH.1 - LOW.1) * t;
+        let b = LOW.2 + (HIGH.2 - LOW.2) * t;
+        egui::Color32::from_rgb(r as u8, g as u8, b as u8)
+    }
+}
+
+fn bytes_to_mb(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
 }
 
 fn format_bytes(bytes: u64) -> String {
