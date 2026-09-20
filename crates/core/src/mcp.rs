@@ -341,10 +341,10 @@ impl McpServer {
             self.sampler.sample_targets(&mut self.targets, self.nvml.as_ref());
 
         for sample in ram_samples {
-            self.buffer.push_ram(sample);
+            self.buffer.push_ram(sample, true);
         }
         for sample in vram_samples {
-            self.buffer.push_vram(sample);
+            self.buffer.push_vram(sample, true);
         }
 
         if let Some(ref nvml) = self.nvml {
