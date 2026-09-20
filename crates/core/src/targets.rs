@@ -14,6 +14,15 @@ pub enum TargetError {
     NameNoMatch(String),
     #[error("target_not_watched: PID {0} is not being watched")]
     TargetNotWatched(u32),
+    #[error("partial_permission: matched {matched} processes, {denied} had permission errors")]
+    PartialPermission { matched: usize, denied: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidStatus {
+    Alive,
+    Dead,
+    Reused,
 }
 
 pub struct TargetManager {
@@ -39,13 +48,20 @@ impl TargetManager {
     }
 
     pub fn add_by_name(&mut self, name: &str, mode: AddMode) -> Result<Vec<u32>, TargetError> {
-        let matches = find_processes_by_name(name, mode)?;
-        if matches.is_empty() {
+        let result = find_processes_by_name(name, mode)?;
+
+        if result.matches.is_empty() {
+            if result.permission_denied_count > 0 {
+                return Err(TargetError::PartialPermission {
+                    matched: 0,
+                    denied: result.permission_denied_count,
+                });
+            }
             return Err(TargetError::NameNoMatch(name.to_string()));
         }
 
         let mut added = Vec::new();
-        for (pid, proc_name, cmdline, starttime) in matches {
+        for (pid, proc_name, cmdline, starttime) in result.matches {
             if !self.targets.contains_key(&pid) {
                 let target = Target::new(pid, proc_name, cmdline, starttime, mode);
                 self.targets.insert(pid, target);
@@ -89,20 +105,24 @@ impl TargetManager {
         }
     }
 
-    pub fn check_alive(&mut self, pid: u32) -> bool {
+    pub fn check_pid_status(&self, pid: u32) -> PidStatus {
         if let Some(target) = self.targets.get(&pid) {
             if !target.alive {
-                return false;
+                return PidStatus::Dead;
             }
-            if let Ok((_, _, starttime)) = read_process_info(pid) {
-                if starttime == target.starttime {
-                    return true;
-                }
+            match get_starttime(pid) {
+                Some(starttime) if starttime == target.starttime => PidStatus::Alive,
+                Some(_) => PidStatus::Reused,
+                None => PidStatus::Dead,
             }
-            self.mark_dead(pid);
-            false
         } else {
-            false
+            PidStatus::Dead
+        }
+    }
+
+    pub fn mark_reused(&mut self, pid: u32) {
+        if let Some(target) = self.targets.get_mut(&pid) {
+            target.alive = false;
         }
     }
 }
@@ -147,15 +167,29 @@ fn parse_starttime(stat: &str) -> Option<u64> {
     fields.get(19)?.parse().ok()
 }
 
-fn find_processes_by_name(
-    name: &str,
-    mode: AddMode,
-) -> Result<Vec<(u32, String, String, u64)>, TargetError> {
-    let mut results = Vec::new();
+pub fn get_starttime(pid: u32) -> Option<u64> {
+    let stat_path = Path::new("/proc").join(pid.to_string()).join("stat");
+    let stat = fs::read_to_string(&stat_path).ok()?;
+    parse_starttime(&stat)
+}
+
+struct FindResult {
+    matches: Vec<(u32, String, String, u64)>,
+    permission_denied_count: usize,
+}
+
+fn find_processes_by_name(name: &str, mode: AddMode) -> Result<FindResult, TargetError> {
+    let mut matches = Vec::new();
+    let mut permission_denied_count = 0;
 
     let proc_dir = match fs::read_dir("/proc") {
         Ok(d) => d,
-        Err(_) => return Ok(results),
+        Err(_) => {
+            return Ok(FindResult {
+                matches,
+                permission_denied_count,
+            })
+        }
     };
 
     for entry in proc_dir.flatten() {
@@ -163,21 +197,30 @@ fn find_processes_by_name(
         let pid_str = file_name.to_string_lossy();
 
         if let Ok(pid) = pid_str.parse::<u32>() {
-            if let Ok((proc_name, cmdline, starttime)) = read_process_info(pid) {
-                let matches = match mode {
-                    AddMode::Exact => proc_name == name,
-                    AddMode::Substring => cmdline.contains(name),
-                    AddMode::Pid => false,
-                };
+            match read_process_info(pid) {
+                Ok((proc_name, cmdline, starttime)) => {
+                    let is_match = match mode {
+                        AddMode::Exact => proc_name == name,
+                        AddMode::Substring => cmdline.contains(name),
+                        AddMode::Pid => false,
+                    };
 
-                if matches {
-                    results.push((pid, proc_name, cmdline, starttime));
+                    if is_match {
+                        matches.push((pid, proc_name, cmdline, starttime));
+                    }
                 }
+                Err(TargetError::PermissionDenied(_)) => {
+                    permission_denied_count += 1;
+                }
+                Err(_) => {}
             }
         }
     }
 
-    Ok(results)
+    Ok(FindResult {
+        matches,
+        permission_denied_count,
+    })
 }
 
 #[cfg(test)]
@@ -216,5 +259,55 @@ mod tests {
         let mut manager = TargetManager::new();
         let result = manager.remove(999999999);
         assert!(matches!(result, Err(TargetError::TargetNotWatched(_))));
+    }
+
+    #[test]
+    fn test_pid_status_alive() {
+        let mut manager = TargetManager::new();
+        let pid = std::process::id();
+        manager.add_by_pid(pid).unwrap();
+
+        assert_eq!(manager.check_pid_status(pid), PidStatus::Alive);
+    }
+
+    #[test]
+    fn test_pid_status_dead_after_mark() {
+        let mut manager = TargetManager::new();
+        let pid = std::process::id();
+        manager.add_by_pid(pid).unwrap();
+        manager.mark_dead(pid);
+
+        assert_eq!(manager.check_pid_status(pid), PidStatus::Dead);
+    }
+
+    #[test]
+    fn test_pid_status_dead_for_invalid() {
+        let manager = TargetManager::new();
+        assert_eq!(manager.check_pid_status(999999999), PidStatus::Dead);
+    }
+
+    #[test]
+    fn test_get_starttime_self() {
+        let pid = std::process::id();
+        let starttime = get_starttime(pid);
+        assert!(starttime.is_some());
+        assert!(starttime.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_get_starttime_invalid() {
+        let starttime = get_starttime(999999999);
+        assert!(starttime.is_none());
+    }
+
+    #[test]
+    fn test_starttime_matches_on_add() {
+        let mut manager = TargetManager::new();
+        let pid = std::process::id();
+        manager.add_by_pid(pid).unwrap();
+
+        let target = manager.get(pid).unwrap();
+        let current_starttime = get_starttime(pid).unwrap();
+        assert_eq!(target.starttime, current_starttime);
     }
 }

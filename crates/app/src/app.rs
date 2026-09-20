@@ -119,14 +119,32 @@ impl Model {
     }
 
     fn do_sample(&mut self) {
-        let (ram_samples, vram_samples) =
-            self.sampler.sample_targets(&mut self.targets, self.nvml.as_ref());
+        let mut pids_to_sample = Vec::new();
+        for pid in self.targets.alive_pids() {
+            match self.targets.check_pid_status(pid) {
+                beholder_core::PidStatus::Dead => {
+                    self.targets.mark_dead(pid);
+                }
+                beholder_core::PidStatus::Reused => {
+                    self.targets.mark_reused(pid);
+                }
+                beholder_core::PidStatus::Alive => {
+                    pids_to_sample.push(pid);
+                }
+            }
+        }
+
+        let result = self.sampler.sample_pids(&pids_to_sample, self.nvml.as_ref());
+
+        for pid in result.not_found {
+            self.targets.mark_dead(pid);
+        }
 
         let track_history = self.view_mode == ViewMode::Line;
-        for sample in ram_samples {
+        for sample in result.ram_samples {
             self.buffer.push_ram(sample, track_history);
         }
-        for sample in vram_samples {
+        for sample in result.vram_samples {
             self.buffer.push_vram(sample, track_history);
         }
 
@@ -161,7 +179,7 @@ impl Model {
     }
 
     fn generate_csv(&self) -> String {
-        let mut lines = vec!["ts_ms,pid,name,rss_bytes,cpu_pct,vram_bytes".to_string()];
+        let mut lines = vec!["rss_ts_ms,cpu_ts_ms,pid,name,rss_bytes,cpu_pct,vram_bytes".to_string()];
 
         for target in self.targets.list() {
             let ram_points = self
@@ -176,28 +194,27 @@ impl Model {
                 .map(|s| s.get_points())
                 .unwrap_or_default();
 
-            let mut combined: Vec<(u64, Option<(u64, f32)>, Option<u64>)> = Vec::new();
+            let mut combined: Vec<(u64, u64, u64, f32, Option<u64>)> = Vec::new();
 
-            for (ts, rss, cpu) in &ram_points {
-                combined.push((*ts, Some((*rss, *cpu)), None));
+            for (rss_ts, rss, cpu_ts, cpu) in &ram_points {
+                combined.push((*rss_ts, *cpu_ts, *rss, *cpu, None));
             }
 
             for (ts, vram) in &vram_points {
-                if let Some(entry) = combined.iter_mut().find(|(t, _, _)| *t == *ts) {
-                    entry.2 = Some(*vram);
+                if let Some(entry) = combined.iter_mut().find(|(rss_ts, _, _, _, _)| *rss_ts == *ts) {
+                    entry.4 = Some(*vram);
                 } else {
-                    combined.push((*ts, None, Some(*vram)));
+                    combined.push((*ts, *ts, 0, 0.0, Some(*vram)));
                 }
             }
 
-            combined.sort_by_key(|(ts, _, _)| *ts);
+            combined.sort_by_key(|(rss_ts, _, _, _, _)| *rss_ts);
 
-            for (ts, ram, vram) in combined {
-                let (rss, cpu) = ram.unwrap_or((0, 0.0));
+            for (rss_ts, cpu_ts, rss, cpu, vram) in combined {
                 let vram_str = vram.map(|v| v.to_string()).unwrap_or_default();
                 lines.push(format!(
-                    "{},{},{},{},{:.2},{}",
-                    ts, target.pid, target.name, rss, cpu, vram_str
+                    "{},{},{},{},{},{:.2},{}",
+                    rss_ts, cpu_ts, target.pid, target.name, rss, cpu, vram_str
                 ));
             }
         }
@@ -223,10 +240,11 @@ impl Model {
 
             let ram_samples: Vec<serde_json::Value> = ram_points
                 .into_iter()
-                .map(|(ts, rss, cpu)| {
+                .map(|(rss_ts, rss, cpu_ts, cpu)| {
                     serde_json::json!({
-                        "ts_ms": ts,
+                        "rss_ts_ms": rss_ts,
                         "rss_bytes": rss,
+                        "cpu_ts_ms": cpu_ts,
                         "cpu_pct": cpu
                     })
                 })
@@ -420,10 +438,10 @@ impl eframe::App for BeholderApp {
                         });
 
                         if let Some(series) = self.model.buffer.get_ram_series(target.pid) {
-                            if let Some((_, rss, cpu)) = series.latest() {
+                            if let Some(sample) = series.latest_raw() {
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("  Current (RSS): {}", format_bytes(rss)));
-                                    ui.label(format!("CPU: {:.1}%", cpu));
+                                    ui.label(format!("  Current (RSS): {}", format_bytes(sample.rss_bytes)));
+                                    ui.label(format!("CPU: {:.1}%", sample.cpu_pct));
                                 });
                             }
                             if let Some((_, peak)) = series.peak_rss() {
@@ -432,8 +450,8 @@ impl eframe::App for BeholderApp {
                         }
 
                         if let Some(series) = self.model.buffer.get_vram_series(target.pid) {
-                            if let Some((_, vram)) = series.latest() {
-                                ui.label(format!("  VRAM: {}", format_bytes(vram)));
+                            if let Some(sample) = series.latest_raw() {
+                                ui.label(format!("  VRAM: {}", format_bytes(sample.used_bytes)));
                             }
                             if let Some((_, peak)) = series.peak() {
                                 ui.label(format!("  VRAM Peak: {}", format_bytes(peak)));
@@ -490,7 +508,7 @@ impl eframe::App for BeholderApp {
                                 let points: PlotPoints = series
                                     .get_points()
                                     .iter()
-                                    .map(|(ts, rss, _)| [*ts as f64 / 1000.0, bytes_to_mb(*rss)])
+                                    .map(|(rss_ts, rss, _, _)| [*rss_ts as f64 / 1000.0, bytes_to_mb(*rss)])
                                     .collect();
 
                                 let color = Self::color_for_index(idx);

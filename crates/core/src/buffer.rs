@@ -3,44 +3,44 @@ use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone)]
 struct Bucket {
-    ts_ms: u64,
+    rss_ts_ms: u64,
     rss_bytes: u64,
+    cpu_ts_ms: u64,
     cpu_pct: f32,
 }
 
 #[derive(Debug)]
 pub struct RingSeries {
-    raw: VecDeque<Sample>,
     downsampled: VecDeque<Bucket>,
     current_bucket_start: Option<u64>,
     current_bucket_max_rss: Option<Sample>,
     current_bucket_last_cpu: Option<Sample>,
+    last_raw_sample: Option<Sample>,
     gauge_min_rss: Option<u64>,
     gauge_max_rss: Option<u64>,
-    gauge_current: Option<Sample>,
 }
 
 impl RingSeries {
     pub fn new() -> Self {
         Self {
-            raw: VecDeque::new(),
             downsampled: VecDeque::new(),
             current_bucket_start: None,
             current_bucket_max_rss: None,
             current_bucket_last_cpu: None,
+            last_raw_sample: None,
             gauge_min_rss: None,
             gauge_max_rss: None,
-            gauge_current: None,
         }
     }
 
-    /// Record a sample. When `track_history` is false, only the running
-    /// min/max/current gauge values are updated — no points are appended
-    /// to the downsampled history, so memory stays O(1) per target.
+    /// Record a sample. `last_raw_sample` and the gauge min/max/current are
+    /// always kept up to date (O(1)). When `track_history` is false, no
+    /// points are appended to the downsampled history, so memory stays
+    /// O(1) per target instead of growing with the window.
     pub fn push(&mut self, sample: Sample, config: &WindowConfig, track_history: bool) {
+        self.last_raw_sample = Some(sample);
         self.gauge_min_rss = Some(self.gauge_min_rss.map_or(sample.rss_bytes, |m| m.min(sample.rss_bytes)));
         self.gauge_max_rss = Some(self.gauge_max_rss.map_or(sample.rss_bytes, |m| m.max(sample.rss_bytes)));
-        self.gauge_current = Some(sample);
 
         if !track_history {
             return;
@@ -77,7 +77,7 @@ impl RingSeries {
 
         let cutoff = sample.ts_ms.saturating_sub(window_ms);
         while let Some(front) = self.downsampled.front() {
-            if front.ts_ms < cutoff {
+            if front.rss_ts_ms < cutoff {
                 self.downsampled.pop_front();
             } else {
                 break;
@@ -93,7 +93,7 @@ impl RingSeries {
     /// up to date in history mode).
     pub fn gauge(&self) -> Option<(u64, u64, u64)> {
         Some((
-            self.gauge_current?.rss_bytes,
+            self.last_raw_sample?.rss_bytes,
             self.gauge_min_rss?,
             self.gauge_max_rss?,
         ))
@@ -102,7 +102,6 @@ impl RingSeries {
     pub fn reset_gauge(&mut self) {
         self.gauge_min_rss = None;
         self.gauge_max_rss = None;
-        self.gauge_current = None;
     }
 
     fn flush_bucket(&mut self) {
@@ -110,23 +109,24 @@ impl RingSeries {
             (self.current_bucket_max_rss.take(), self.current_bucket_last_cpu.take())
         {
             self.downsampled.push_back(Bucket {
-                ts_ms: max_sample.ts_ms,
+                rss_ts_ms: max_sample.ts_ms,
                 rss_bytes: max_sample.rss_bytes,
+                cpu_ts_ms: cpu_sample.ts_ms,
                 cpu_pct: cpu_sample.cpu_pct,
             });
         }
     }
 
-    pub fn get_points(&self) -> Vec<(u64, u64, f32)> {
+    pub fn get_points(&self) -> Vec<(u64, u64, u64, f32)> {
         let mut points: Vec<_> = self
             .downsampled
             .iter()
-            .map(|b| (b.ts_ms, b.rss_bytes, b.cpu_pct))
+            .map(|b| (b.rss_ts_ms, b.rss_bytes, b.cpu_ts_ms, b.cpu_pct))
             .collect();
 
         if let (Some(max), Some(cpu)) = (&self.current_bucket_max_rss, &self.current_bucket_last_cpu)
         {
-            points.push((max.ts_ms, max.rss_bytes, cpu.cpu_pct));
+            points.push((max.ts_ms, max.rss_bytes, cpu.ts_ms, cpu.cpu_pct));
         }
 
         points
@@ -137,8 +137,8 @@ impl RingSeries {
 
         for b in &self.downsampled {
             match max {
-                Some((_, rss)) if b.rss_bytes > rss => max = Some((b.ts_ms, b.rss_bytes)),
-                None => max = Some((b.ts_ms, b.rss_bytes)),
+                Some((_, rss)) if b.rss_bytes > rss => max = Some((b.rss_ts_ms, b.rss_bytes)),
+                None => max = Some((b.rss_ts_ms, b.rss_bytes)),
                 _ => {}
             }
         }
@@ -154,14 +154,18 @@ impl RingSeries {
         max
     }
 
-    pub fn latest(&self) -> Option<(u64, u64, f32)> {
+    pub fn latest_raw(&self) -> Option<&Sample> {
+        self.last_raw_sample.as_ref()
+    }
+
+    pub fn latest_downsampled(&self) -> Option<(u64, u64, u64, f32)> {
         if let (Some(max), Some(cpu)) = (&self.current_bucket_max_rss, &self.current_bucket_last_cpu)
         {
-            return Some((max.ts_ms, max.rss_bytes, cpu.cpu_pct));
+            return Some((max.ts_ms, max.rss_bytes, cpu.ts_ms, cpu.cpu_pct));
         }
         self.downsampled
             .back()
-            .map(|b| (b.ts_ms, b.rss_bytes, b.cpu_pct))
+            .map(|b| (b.rss_ts_ms, b.rss_bytes, b.cpu_ts_ms, b.cpu_pct))
     }
 
     pub fn count(&self) -> usize {
@@ -169,11 +173,11 @@ impl RingSeries {
     }
 
     pub fn clear(&mut self) {
-        self.raw.clear();
         self.downsampled.clear();
         self.current_bucket_start = None;
         self.current_bucket_max_rss = None;
         self.current_bucket_last_cpu = None;
+        self.last_raw_sample = None;
         self.reset_gauge();
     }
 }
@@ -195,9 +199,9 @@ pub struct VramRingSeries {
     downsampled: VecDeque<VramBucket>,
     current_bucket_start: Option<u64>,
     current_bucket_max: Option<VramProcessSample>,
+    last_raw_sample: Option<VramProcessSample>,
     gauge_min: Option<u64>,
     gauge_max: Option<u64>,
-    gauge_current: Option<VramProcessSample>,
 }
 
 impl VramRingSeries {
@@ -206,18 +210,19 @@ impl VramRingSeries {
             downsampled: VecDeque::new(),
             current_bucket_start: None,
             current_bucket_max: None,
+            last_raw_sample: None,
             gauge_min: None,
             gauge_max: None,
-            gauge_current: None,
         }
     }
 
-    /// Record a sample. When `track_history` is false, only the running
-    /// min/max/current gauge values are updated.
+    /// Record a sample. `last_raw_sample` and the gauge min/max are always
+    /// kept up to date. When `track_history` is false, no points are
+    /// appended to the downsampled history.
     pub fn push(&mut self, sample: VramProcessSample, config: &WindowConfig, track_history: bool) {
+        self.last_raw_sample = Some(sample);
         self.gauge_min = Some(self.gauge_min.map_or(sample.used_bytes, |m| m.min(sample.used_bytes)));
         self.gauge_max = Some(self.gauge_max.map_or(sample.used_bytes, |m| m.max(sample.used_bytes)));
-        self.gauge_current = Some(sample);
 
         if !track_history {
             return;
@@ -308,7 +313,11 @@ impl VramRingSeries {
         max
     }
 
-    pub fn latest(&self) -> Option<(u64, u64)> {
+    pub fn latest_raw(&self) -> Option<&VramProcessSample> {
+        self.last_raw_sample.as_ref()
+    }
+
+    pub fn latest_downsampled(&self) -> Option<(u64, u64)> {
         if let Some(ref max) = self.current_bucket_max {
             return Some((max.ts_ms, max.used_bytes));
         }
@@ -323,7 +332,7 @@ impl VramRingSeries {
     /// up to date in history mode).
     pub fn gauge(&self) -> Option<(u64, u64, u64)> {
         Some((
-            self.gauge_current?.used_bytes,
+            self.last_raw_sample?.used_bytes,
             self.gauge_min?,
             self.gauge_max?,
         ))
@@ -332,13 +341,13 @@ impl VramRingSeries {
     pub fn reset_gauge(&mut self) {
         self.gauge_min = None;
         self.gauge_max = None;
-        self.gauge_current = None;
     }
 
     pub fn clear(&mut self) {
         self.downsampled.clear();
         self.current_bucket_start = None;
         self.current_bucket_max = None;
+        self.last_raw_sample = None;
         self.reset_gauge();
     }
 }
@@ -458,7 +467,24 @@ mod tests {
 
         let points = series.get_points();
         assert_eq!(points.len(), 1);
-        assert!((points[0].2 - 99.0).abs() < 0.01);
+        assert!((points[0].3 - 99.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_cpu_timestamp_separate_from_rss() {
+        let config = WindowConfig::new(30, 1000).unwrap();
+        let mut series = RingSeries::new();
+
+        series.push(make_sample(100, 1, 500, 10.0), &config, true);
+        series.push(make_sample(200, 1, 300, 20.0), &config, true);
+        series.push(make_sample(300, 1, 400, 30.0), &config, true);
+
+        let points = series.get_points();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].0, 100);
+        assert_eq!(points[0].1, 500);
+        assert_eq!(points[0].2, 300);
+        assert!((points[0].3 - 30.0).abs() < 0.01);
     }
 
     #[test]
@@ -529,6 +555,38 @@ mod tests {
         series.clear();
         assert_eq!(series.count(), 0);
         assert!(series.peak_rss().is_none());
+        assert!(series.latest_raw().is_none());
+    }
+
+    #[test]
+    fn test_latest_raw_vs_downsampled() {
+        let config = WindowConfig::new(30, 1000).unwrap();
+        let mut series = RingSeries::new();
+
+        series.push(make_sample(0, 1, 100, 10.0), &config, true);
+        series.push(make_sample(100, 1, 500, 20.0), &config, true);
+        series.push(make_sample(200, 1, 300, 30.0), &config, true);
+
+        let raw = series.latest_raw().unwrap();
+        assert_eq!(raw.ts_ms, 200);
+        assert_eq!(raw.rss_bytes, 300);
+        assert!((raw.cpu_pct - 30.0).abs() < 0.01);
+
+        let downsampled = series.latest_downsampled().unwrap();
+        assert_eq!(downsampled.1, 500);
+    }
+
+    #[test]
+    fn test_gauge_tracks_min_max_current_without_history() {
+        let config = WindowConfig::new(30, 1000).unwrap();
+        let mut series = RingSeries::new();
+
+        series.push(make_sample(0, 1, 100, 10.0), &config, false);
+        series.push(make_sample(1000, 1, 500, 20.0), &config, false);
+        series.push(make_sample(2000, 1, 300, 15.0), &config, false);
+
+        assert_eq!(series.count(), 0);
+        assert_eq!(series.gauge(), Some((300, 100, 500)));
     }
 
     #[test]
@@ -543,5 +601,8 @@ mod tests {
         let points = series.get_points();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].1, 500);
+
+        let raw = series.latest_raw().unwrap();
+        assert_eq!(raw.used_bytes, 300);
     }
 }
