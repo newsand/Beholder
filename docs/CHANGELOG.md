@@ -1,3 +1,8 @@
+## [2026-09-21] Version 1.0.0-beta
+
+### Changed
+- Aligned Cargo workspace version to `1.0.0-beta` to match GitHub release tag `v1.0.0-beta`.
+
 ## [2026-09-17] MODO DOC iniciado
 
 ### Construído (doc)
