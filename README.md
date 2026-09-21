@@ -1,10 +1,10 @@
 # Beholder
 
-Desktop Linux process monitor with NVIDIA VRAM tracking. Designed for developers, SREs, and AI agents hunting memory leaks in RAM and VRAM.
+Desktop process monitor with NVIDIA VRAM tracking (Linux and Windows). Designed for developers, SREs, and AI agents hunting memory leaks in RAM and VRAM.
 
 ## Features
 
-- **Process Monitoring**: Track RSS (Resident Set Size) and CPU% for targeted processes
+- **Process Monitoring**: Track RAM (Linux RSS / Windows Working Set) and CPU% for targeted processes
 - **NVIDIA VRAM**: GPU 0 board memory (total/used/free) and per-process VRAM usage
 - **Flexible Targeting**: Add processes by PID, exact name (`comm`), or cmdline substring
 - **Time Windows**: 30s, 5min, 30min, or 1h history with automatic downsampling
@@ -13,13 +13,23 @@ Desktop Linux process monitor with NVIDIA VRAM tracking. Designed for developers
 
 ## Build
 
-Requires Rust 1.75+ and Linux.
+Requires Rust 1.75+. Linux or Windows (MSVC).
 
 ```bash
 cargo build --release
 ```
 
-The binary will be at `target/release/beholder`.
+The binary will be at `target/release/beholder` (Linux) or `target/release/beholder.exe` (Windows).
+
+### Windows production release
+
+Run on Windows (PowerShell), with Visual Studio C++ Build Tools installed:
+
+```powershell
+.\scripts\build-windows-release.ps1
+```
+
+Writes `dist/windows/beholder.exe` and a versioned zip.
 
 ### Dependencies
 
@@ -46,7 +56,7 @@ In MCP mode, Beholder reads JSON-RPC requests from stdin and writes responses to
 ### Adding Targets
 
 1. **By PID**: Enter a process ID directly
-2. **By Exact Name**: Match the process `comm` (short name, up to 15 chars on Linux)
+2. **By Exact Name**: Match the process `comm` (Linux) or image name (Windows, `.exe` optional)
 3. **By Substring**: Match any part of the full cmdline
 
 Targets are added once at the time of the request. New processes with the same name that start later are not automatically tracked (no re-scan).
@@ -101,6 +111,7 @@ Export collected data via the GUI menu or MCP `export_buffer` tool. Formats:
 | Metric | Description |
 |--------|-------------|
 | **RSS** | Resident Set Size - physical memory currently in RAM (Linux `VmRSS`) |
+| **Working Set** | Physical memory currently in RAM (Windows; same `rss_bytes` field) |
 | **CPU%** | CPU usage percentage, normalized by number of cores |
 | **VRAM Total** | Total GPU memory available |
 | **VRAM Used** | GPU memory currently in use (board-wide) |

@@ -2,6 +2,7 @@ pub mod buffer;
 pub mod mcp;
 pub mod model;
 pub mod nvml;
+mod process_info;
 pub mod sampler;
 pub mod targets;
 

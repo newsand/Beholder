@@ -1,4 +1,6 @@
 /target/
+/dist/
+/graphify-out/
 Cargo.lock
 *.swp
 *.swo

@@ -387,7 +387,13 @@ impl eframe::App for BeholderApp {
                 ui.horizontal(|ui| {
                     let hint = match self.model.add_mode {
                         AddMode::Pid => "Enter PID...",
-                        AddMode::Exact => "comm name...",
+                        AddMode::Exact => {
+                            if cfg!(target_os = "windows") {
+                                "image name..."
+                            } else {
+                                "comm name..."
+                            }
+                        }
                         AddMode::Substring => "cmdline pattern...",
                     };
                     let te = egui::TextEdit::singleline(&mut self.model.add_input).hint_text(hint);
@@ -440,7 +446,7 @@ impl eframe::App for BeholderApp {
                         if let Some(series) = self.model.buffer.get_ram_series(target.pid) {
                             if let Some(sample) = series.latest_raw() {
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("  Current (RSS): {}", format_bytes(sample.rss_bytes)));
+                                    ui.label(format!("  Current ({}): {}", ram_label(), format_bytes(sample.rss_bytes)));
                                     ui.label(format!("CPU: {:.1}%", sample.cpu_pct));
                                 });
                             }
@@ -493,7 +499,7 @@ impl eframe::App for BeholderApp {
                     let available = ui.available_size();
                     let plot_height = (available.y - 20.0) / 2.0;
 
-                    ui.heading("Current (RSS)");
+                    ui.heading(format!("Current ({})", ram_label()));
                     let rss_plot = Plot::new("rss_plot")
                         .height(plot_height)
                         .x_axis_label("Time (s)")
@@ -551,7 +557,7 @@ impl eframe::App for BeholderApp {
                     });
                 }
                 ViewMode::Gauge => {
-                    ui.heading("Current (RSS) — Gauge");
+                    ui.heading(format!("Current ({}) — Gauge", ram_label()));
                     ui.label(
                         egui::RichText::new(
                             "Live snapshot only — history isn't retained while this mode is active.",
@@ -722,6 +728,14 @@ impl BeholderApp {
 
 fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
+}
+
+fn ram_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Working Set"
+    } else {
+        "RSS"
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {

@@ -6,7 +6,7 @@ use clap::Parser;
 
 #[derive(Parser)]
 #[command(name = "beholder")]
-#[command(about = "Process and VRAM monitor for Linux")]
+#[command(about = "Process and VRAM monitor")]
 #[command(version)]
 struct Cli {
     #[arg(long, help = "Run in MCP headless mode (stdio)")]

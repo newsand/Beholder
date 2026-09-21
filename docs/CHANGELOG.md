@@ -1,3 +1,10 @@
+## [2026-09-21] Windows port
+
+- Process identity on Windows via sysinfo (`process_info/windows.rs`); Linux keeps `/proc`.
+- eframe: `wayland`/`x11` only on Linux; glow on both.
+- UI RAM label: Working Set on Windows, RSS on Linux.
+- `scripts/build-windows-release.ps1` — test + release build, zip under `dist/windows/`.
+
 ## [2026-09-17] MODO DOC iniciado
 
 ### Construído (doc)
