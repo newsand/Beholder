@@ -1,5 +1,7 @@
 # Beholder
 
+![Beholder](assets/wallpaper.jpg)
+
 Desktop Linux process monitor with NVIDIA VRAM tracking. Designed for developers, SREs, and AI agents hunting memory leaks in RAM and VRAM.
 
 ## Features
@@ -24,6 +26,15 @@ The binary will be at `target/release/beholder`.
 ### Dependencies
 
 - **NVIDIA GPU** (optional): Requires NVIDIA driver with NVML library. Without NVIDIA GPU, RAM/CPU monitoring works; VRAM features show "GPU: N/A".
+
+## Install (Linux, adds app icon + menu entry)
+
+```bash
+cargo build --release
+./packaging/install.sh
+```
+
+This installs the binary to `~/.local/bin/beholder`, the Beholder logo as the app icon under `~/.local/share/icons/hicolor/`, and a desktop entry to `~/.local/share/applications/beholder.desktop` so it shows up in your app launcher with the icon.
 
 ## Run
 
