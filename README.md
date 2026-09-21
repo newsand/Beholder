@@ -1,5 +1,7 @@
 # Beholder
 
+![Beholder](assets/wallpaper.jpg)
+
 Desktop process monitor with NVIDIA VRAM tracking (Linux and Windows). Designed for developers, SREs, and AI agents hunting memory leaks in RAM and VRAM.
 
 ## Features
