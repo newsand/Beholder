@@ -1,4 +1,5 @@
 mod app;
+mod commands;
 
 use beholder_core::mcp::McpServer;
 use beholder_core::nvml::try_init_nvml;
@@ -13,6 +14,19 @@ struct Cli {
     mcp: bool,
 }
 
+fn load_icon() -> egui::IconData {
+    let bytes = include_bytes!("../../../assets/icons/beholder-256.png");
+    let image = image::load_from_memory(bytes)
+        .expect("embedded icon is a valid PNG")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let nvml = try_init_nvml();
@@ -24,7 +38,8 @@ fn main() {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1200.0, 800.0])
-                .with_min_inner_size([800.0, 600.0]),
+                .with_min_inner_size([800.0, 600.0])
+                .with_icon(load_icon()),
             ..Default::default()
         };
 

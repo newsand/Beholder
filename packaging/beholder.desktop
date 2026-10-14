@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Beholder
+Comment=Linux process and NVIDIA VRAM monitor
+Exec=beholder
+Icon=beholder
+Terminal=false
+Categories=System;Monitor;Utility;

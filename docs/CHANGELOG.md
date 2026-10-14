@@ -1,7 +1,17 @@
+<<<<<<< HEAD
 ## [2026-09-21] Version 1.0.0-beta
 
 ### Changed
 - Aligned Cargo workspace version to `1.0.0-beta` to match GitHub release tag `v1.0.0-beta`.
+=======
+## [2026-10-14] Feature plot-shortcuts (F4 / F5)
+
+### Spec
+- `03-features/plot-shortcuts.md`: F4 recenter vista; F5 clear buffer + recenter
+- `chart-window.md`: ponteiro aos atalhos
+- `01-architecture.md`: `app/commands` no tree (nível inalterado)
+- Sem mudança em `04-contracts` (F5 = `clear_buffer`; F4 só UI)
+>>>>>>> 2ba4e89 (v0.2.0-shortcuts)
 
 ## [2026-09-17] MODO DOC iniciado
 
