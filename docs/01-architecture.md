@@ -19,7 +19,7 @@ Sampler/NVML events ─────┘
 ```
 /src or /crates
   core/   sampler, targets, buffer/window, nvml, mcp tools
-  app/    egui dashboard, plots
+  app/    egui dashboard, plots, commands (atalhos F4/F5 de plot)
 ```
 Nomes exatos = discretion; boundaries acima = não-negociável.
 

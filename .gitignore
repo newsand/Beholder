@@ -5,3 +5,14 @@ Cargo.lock
 *~
 .idea/
 .vscode/
+
+# graphify
+graphify-out/
+
+# agent / IDE local
+.cursor/
+.claude/
+.codex/
+.agent/
+.gemini/
+crates/core/graphify-out

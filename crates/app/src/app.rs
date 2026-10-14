@@ -275,6 +275,7 @@ impl Model {
 pub struct BeholderApp {
     model: Model,
     last_sample: Instant,
+    reset_plot_view: bool,
 }
 
 impl BeholderApp {
@@ -282,6 +283,7 @@ impl BeholderApp {
         Self {
             model: Model::new(nvml),
             last_sample: Instant::now(),
+            reset_plot_view: false,
         }
     }
 
@@ -293,6 +295,18 @@ impl BeholderApp {
 
 impl eframe::App for BeholderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !ctx.wants_keyboard_input() {
+            if let Some(cmd) = ctx.input(|i| crate::commands::PlotCommand::detect(i)) {
+                let effects = cmd.effects();
+                if effects.clear_buffer {
+                    self.model.update(Message::ClearBuffer);
+                }
+                if effects.reset_plot_view {
+                    self.reset_plot_view = true;
+                }
+            }
+        }
+
         let interval = Duration::from_millis(self.model.config.interval_ms as u64);
         if self.last_sample.elapsed() >= interval {
             self.model.update(Message::Tick);
@@ -494,12 +508,15 @@ impl eframe::App for BeholderApp {
                     let plot_height = (available.y - 20.0) / 2.0;
 
                     ui.heading("Current (RSS)");
-                    let rss_plot = Plot::new("rss_plot")
+                    let mut rss_plot = Plot::new("rss_plot")
                         .height(plot_height)
                         .x_axis_label("Time (s)")
                         .y_axis_label("MB")
                         .y_axis_formatter(|mark, _range| format!("{:.2}", mark.value))
                         .legend(egui_plot::Legend::default());
+                    if self.reset_plot_view {
+                        rss_plot = rss_plot.reset();
+                    }
 
                     rss_plot.show(ui, |plot_ui| {
                         let targets: Vec<_> = self.model.targets.list().cloned().collect();
@@ -523,12 +540,15 @@ impl eframe::App for BeholderApp {
 
                     ui.add_space(10.0);
                     ui.heading("VRAM per Process");
-                    let vram_plot = Plot::new("vram_plot")
+                    let mut vram_plot = Plot::new("vram_plot")
                         .height(plot_height)
                         .x_axis_label("Time (s)")
                         .y_axis_label("MB")
                         .y_axis_formatter(|mark, _range| format!("{:.2}", mark.value))
                         .legend(egui_plot::Legend::default());
+                    if self.reset_plot_view {
+                        vram_plot = vram_plot.reset();
+                    }
 
                     vram_plot.show(ui, |plot_ui| {
                         let targets: Vec<_> = self.model.targets.list().cloned().collect();
@@ -549,8 +569,11 @@ impl eframe::App for BeholderApp {
                             }
                         }
                     });
+
+                    self.reset_plot_view = false;
                 }
                 ViewMode::Gauge => {
+                    self.reset_plot_view = false;
                     ui.heading("Current (RSS) — Gauge");
                     ui.label(
                         egui::RichText::new(
