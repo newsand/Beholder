@@ -16,3 +16,4 @@ graphify-out/
 .agent/
 .gemini/
 crates/core/graphify-out
+release/

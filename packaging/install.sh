@@ -4,6 +4,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_SRC="$REPO_ROOT/target/release/beholder"
+# Inside a release archive the binary sits at the archive root.
+[ -f "$REPO_ROOT/beholder" ] && BIN_SRC="$REPO_ROOT/beholder"
 BIN_DEST="$HOME/.local/bin/beholder"
 ICON_DEST_DIR="$HOME/.local/share/icons/hicolor"
 DESKTOP_DEST="$HOME/.local/share/applications/beholder.desktop"
